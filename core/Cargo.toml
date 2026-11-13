@@ -1,0 +1,14 @@
+[package]
+name = "toolya-core"
+version = "0.0.1"
+edition = "2021"
+description = "DUML protocol core for DJI Goggles 3 (native + wasm)"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+wasm = ["dep:wasm-bindgen"]

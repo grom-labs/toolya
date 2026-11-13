@@ -1,0 +1,28 @@
+/target
+**/*.rs.bk
+reference/__pycache__/
+node_modules/
+web/node_modules/
+web/dist/
+core/pkg/
+core/pkg-node/
+web/vendor/
+worker/node_modules/
+worker/dist/
+worker/.wrangler/
+
+# internal dev scaffolding (references the private research repo); not for the public repo
+/reference/
+/tools/
+*.bak
+*.bak-*
+HANDOFF.md
+PLAN.md
+
+# secrets / local env (never commit)
+.env
+.env.*
+*.keys
+*.pem
+*.testkey*
+.dev.vars

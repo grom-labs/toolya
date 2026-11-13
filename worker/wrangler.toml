@@ -1,0 +1,43 @@
+name = "toolya"
+main = "src/index.ts"
+compatibility_date = "2026-11-12"
+
+# custom domain (toolya.dev must be a zone in the Cloudflare account; on deploy
+# wrangler provisions DNS + TLS automatically). Both apex and www serve the Worker;
+# add a CF redirect rule www -> apex later if you prefer a single canonical host.
+routes = [
+  { pattern = "toolya.dev", custom_domain = true },
+  { pattern = "www.toolya.dev", custom_domain = true },
+]
+
+# serve the built web app as static assets; Worker handles /api/* and /healthz
+[assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# don't auto-strip/redirect .html — the Worker routes /app → /app.html itself
+html_handling = "none"
+# run the Worker before assets so it can inject the dry-run flag into served HTML
+run_worker_first = true
+
+# demo mode: app simulates enable/connect, no stats, no device. Flip to "false" for real.
+[vars]
+DRY_RUN = "true"
+
+# per-IP rate limit for the anonymous stat beacon (deters count inflation)
+[[unsafe.bindings]]
+name = "STAT_RL"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }
+
+# anonymous aggregate stats (enable/connect outcome + os/browser). Write-only from
+# the Worker; query later via the Analytics Engine SQL API.
+[[analytics_engine_datasets]]
+binding = "AE"
+dataset = "toolya"
+
+[observability]
+enabled = true
+[observability.traces]
+enabled = true

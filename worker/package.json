@@ -1,0 +1,14 @@
+{
+  "name": "toolya-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "WRANGLER_SEND_METRICS=false wrangler deploy --dry-run --outdir dist",
+    "dev": "WRANGLER_SEND_METRICS=false wrangler dev",
+    "deploy": "WRANGLER_SEND_METRICS=false wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "wrangler": "^4.86.0"
+  }
+}
