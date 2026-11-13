@@ -1,7 +1,8 @@
-//! toolya CLI (M0 scaffold). Only `duml-show` works offline; the rest are stubs
-//! until hardware wiring lands per milestone (see ../PLAN.md). No command touches
-//! the goggles yet.
+//! toolya CLI. `adb` enables root over USB, `info` parses device props (offline),
+//! `natartos` installs/manages the on-device mod framework, `desk` prints the
+//! desk-mode profile. Stub commands await hardware wiring per milestone (PLAN.md).
 
+mod desk;
 mod info;
 mod natartos;
 mod reboot;
@@ -30,8 +31,6 @@ const STUBS: &[(&str, &str)] = &[
     ("emu", "M6 · host-mode dev (research)"),
 ];
 
-// `desk` profile: the sequence that puts the goggles into desk-dev mode.
-const DESK_STEPS: &[&str] = &["adb", "awake", "tx off", "fan quiet", "stream"];
 
 fn usage() {
     eprintln!("toolya {} — https://toolya.dev\n", env!("CARGO_PKG_VERSION"));
@@ -53,7 +52,6 @@ fn main() {
         "" | "-h" | "--help" => { usage(); exit(1); }
         "--version" => println!("toolya {} — https://toolya.dev\nCopyright (c) 2026 grom-labs. AGPL-3.0 + attribution term, see NOTICE.", env!("CARGO_PKG_VERSION")),
         "adb" => {
-            // Informed-consent gate: this writes the DUML enable packet to the goggles.
             eprintln!(
                 "⚠ toolya enables ADB/root on your DJI Goggles 3 — an unauthorized modification\n\
                  of your own device. It likely violates DJI's Terms of Service; DJI may suspend/ban\n\
@@ -64,9 +62,13 @@ fn main() {
                 eprintln!("\nRe-run to proceed:  toolya adb --yes");
                 exit(1);
             }
-            // After ~5s USB reconfigures to ACM+ADB; connect via adb afterwards.
-            let seq = 0x2711u16; // matches the verified vector; device ignores exact value
-            match usb::Goggles::open().and_then(|g| g.send_duml(&toolya_core::adb_enable_pkt(seq))) {
+            // Full enable: handshake + cmd_id scan — same plan the Web client uses.
+            let plan = toolya_core::enable_plan();
+            let goggles = match usb::Goggles::open() {
+                Ok(g) => g,
+                Err(e) => { eprintln!("toolya adb: {e}"); exit(1); }
+            };
+            match goggles.run_enable(&plan, |msg| eprintln!("  {msg}")) {
                 Ok(()) => println!("adb enable sent — wait ~5s, then `adb devices`"),
                 Err(e) => { eprintln!("toolya adb: {e}"); exit(1); }
             }
@@ -136,21 +138,19 @@ fn main() {
         }
         "selinux" => selinux::run(&args[1..]),
         "natartos" => natartos::run(&args[1..]),
-        "desk" => {
-            // Composition profile. Each step is itself a toolya command; wiring
-            // lands as those commands get hardware support.
-            println!("desk profile — sequence (each pending its own command/hardware):");
-            for (i, s) in DESK_STEPS.iter().enumerate() {
-                println!("  {}. toolya {s}", i + 1);
-            }
-            eprintln!("🔴 not runnable yet — underlying steps need hardware (M1–M4).");
-            exit(2);
-        }
+        "desk" => desk::run(),
         "duml-show" => match args.get(1).map(String::as_str) {
             Some("adb-enable") => {
-                // seq 0x2711 reproduces the verified vector; real sends will increment
-                let p = toolya_core::adb_enable_pkt(0x2711);
-                println!("{}", p.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+                let p = toolya_core::enable_plan();
+                println!("handshake ({} packets, {} init + {} probe):", p.handshake.len(), p.init_count, p.handshake.len() - p.init_count);
+                for (i, pkt) in p.handshake.iter().enumerate() {
+                    let tag = if i < p.init_count { "init" } else { "probe" };
+                    println!("  [{tag:>5} {i:>2}] {}", pkt.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                }
+                println!("candidates ({}, scan until USB disconnect):", p.candidates.len());
+                for (i, pkt) in p.candidates.iter().enumerate() {
+                    println!("  [0x{:02x}] {}", 0x64u8.wrapping_add(i as u8).min(0x6F), pkt.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                }
             }
             other => { eprintln!("unknown action: {}", other.unwrap_or("<none>")); exit(1); }
         },

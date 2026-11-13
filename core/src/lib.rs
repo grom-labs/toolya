@@ -113,45 +113,68 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// The full adb-enable plan as JSON. The device needs more than one packet:
-/// 1. a handshake (init packets, then probe packets read until `expect` appears —
-///    confirms the goggles are awake and responding),
-/// 2. then a cmd_id scan: the enable cmd_id SHIFTS between boots, so the client
-///    sends each `candidates` packet until the device disconnects (= adb enabling).
-/// The client just sends/reads/detects.
-/// Transport: interface `iface`, bulk OUT endpoint `ep_out`, bulk IN `ep_in`.
-pub fn enable_plan_json() -> String {
-    // 4 fixed init packets (explicit DUML bodies with embedded seqs 0x2710..0x2713)
+/// Typed enable plan — shared contract between CLI (native) and Web (WASM/JSON).
+/// The transport layer (nusb / WebUSB) executes the plan step by step.
+pub struct EnablePlan {
+    pub handshake: Vec<Vec<u8>>,
+    pub init_count: usize,
+    pub candidates: Vec<Vec<u8>>,
+    pub expect: Vec<u8>,
+    pub iface: u8,
+    pub ep_out: u8,
+    pub ep_in: u8,
+}
+
+/// Build the typed enable plan (no I/O, no allocation format bias).
+pub fn enable_plan() -> EnablePlan {
     let init: [&[u8]; 4] = [
         &[0x2A, 0x1F, 0x10, 0x27, 0x40, 0x00, 0x01],
         &[0x2A, 0x5C, 0x11, 0x27, 0x40, 0x00, 0x51, 0x04],
         &[0x2A, 0x9C, 0x12, 0x27, 0x42, 0x00, 0x32, 0x00],
         &[0x2A, 0x9C, 0x13, 0x27, 0x42, 0x00, 0x32, 0x31, 0x31, 0x00, 0x00, 0x00],
     ];
-    let mut handshake: Vec<String> = init.iter().map(|b| hex(&frame(b))).collect();
-    // 24 probe packets (dst 0xBC, cmd_id 0x4F, seq 0x2714+i) — sent until `</dji>`
+    let mut handshake: Vec<Vec<u8>> = init.iter().map(|b| frame(b)).collect();
     for i in 0u16..24 {
         let body = [
             0x2A, 0xBC, (0x14 + i) as u8, 0x27, 0x40, 0x00, 0x4F, 0x01, 0x00, i as u8,
             0x00, 0x00, 0xE8, 0x03, 0x00, 0x00,
         ];
-        handshake.push(hex(&frame(&body)));
+        handshake.push(frame(&body));
     }
-    // enable candidates: make_pkt(WMS,0x07,cid,[01]), scan order, seq 0x2711+i
     const CAND: [u8; 16] = [
-        0x64, 0x65, 0x66, 0x63, 0x67, 0x60, 0x61, 0x62, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E,
-        0x6F,
+        0x64, 0x65, 0x66, 0x63, 0x67, 0x60, 0x61, 0x62,
+        0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
     ];
-    let candidates: Vec<String> = CAND
+    let candidates: Vec<Vec<u8>> = CAND
         .iter()
         .enumerate()
-        .map(|(i, &cid)| hex(&make_pkt(WMS, CMDSET_WMS, cid, &[0x01], 0x40, 0x2711 + i as u16)))
+        .map(|(i, &cid)| make_pkt(WMS, CMDSET_WMS, cid, &[0x01], 0x40, 0x2711 + i as u16))
         .collect();
-    let arr = |v: &[String]| v.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(",");
+    EnablePlan {
+        handshake,
+        init_count: 4,
+        candidates,
+        expect: b"</dji>".to_vec(),
+        iface: 4,
+        ep_out: 4,
+        ep_in: 5,
+    }
+}
+
+/// The full adb-enable plan as JSON (for the WASM/Web transport layer).
+/// Delegates to `enable_plan()` — single source of truth.
+pub fn enable_plan_json() -> String {
+    let p = enable_plan();
+    let hex_arr = |v: &[Vec<u8>]| v.iter().map(|b| format!("\"{}\"", hex(b))).collect::<Vec<_>>().join(",");
     format!(
-        "{{\"handshake\":[{}],\"init_count\":4,\"candidates\":[{}],\"expect\":\"</dji>\",\"iface\":4,\"ep_out\":4,\"ep_in\":5}}",
-        arr(&handshake),
-        arr(&candidates)
+        "{{\"handshake\":[{}],\"init_count\":{},\"candidates\":[{}],\"expect\":\"{}\",\"iface\":{},\"ep_out\":{},\"ep_in\":{}}}",
+        hex_arr(&p.handshake),
+        p.init_count,
+        hex_arr(&p.candidates),
+        std::str::from_utf8(&p.expect).unwrap_or("</dji>"),
+        p.iface,
+        p.ep_out,
+        p.ep_in,
     )
 }
 
@@ -168,9 +191,60 @@ pub fn adb_enable_packet(seq: u16) -> Vec<u8> {
 
 /// The full adb-enable plan (handshake + candidates) as JSON, for the browser.
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn enable_plan() -> String {
+#[wasm_bindgen(js_name = "enable_plan")]
+pub fn enable_plan_wasm() -> String {
     enable_plan_json()
+}
+
+/// Device contract as JSON — single source of truth for Web.
+/// Covers USB configs, SELinux, file paths, natartos constants, screen geometry.
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn device_contract() -> String {
+    use contract::*;
+    format!(
+        concat!(
+            "{{",
+            "\"usb\":{{\"adb\":\"{}\",\"rndis\":\"{}\"}},",
+            "\"selinux\":{{\"addrs\":[{}],\"enforce_offset\":{}}},",
+            "\"files\":{{\"background\":\"{}\",\"usage\":\"{}\",\"screencap\":\"{}\",\"fb_shared\":\"{}\"}},",
+            "\"screen\":{{\"width\":{},\"height\":{},\"grab_trigger\":\"{}\",\"stream_port\":{}}},",
+            "\"natartos\":{{\"schema\":{},\"repo\":\"{}\",\"stock_dir\":\"{}\",\"manifest_device\":\"{}\",",
+            "\"bootcount\":\"{}\",\"status\":\"{}\",\"disabled\":\"{}\",\"log\":\"{}\"}}",
+            "}}"
+        ),
+        usb::ADB, usb::RNDIS,
+        selinux::STATE_ADDRS.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(","),
+        selinux::ENFORCE_OFFSET,
+        files::BACKGROUND, files::USAGE, files::SCREENCAP, files::FB_SHARED,
+        screen::WIDTH, screen::HEIGHT, screen::GRAB_TRIGGER, screen::STREAM_PORT,
+        natartos::MANIFEST_SCHEMA, natartos::REPO, natartos::STOCK_DIR, natartos::MANIFEST_DEVICE,
+        natartos::BOOTCOUNT, natartos::STATUS, natartos::DISABLED, natartos::LOG,
+    )
+}
+
+/// Same contract, non-WASM (for testing).
+pub fn device_contract_json() -> String {
+    use contract::*;
+    format!(
+        concat!(
+            "{{",
+            "\"usb\":{{\"adb\":\"{}\",\"rndis\":\"{}\"}},",
+            "\"selinux\":{{\"addrs\":[{}],\"enforce_offset\":{}}},",
+            "\"files\":{{\"background\":\"{}\",\"usage\":\"{}\",\"screencap\":\"{}\",\"fb_shared\":\"{}\"}},",
+            "\"screen\":{{\"width\":{},\"height\":{},\"grab_trigger\":\"{}\",\"stream_port\":{}}},",
+            "\"natartos\":{{\"schema\":{},\"repo\":\"{}\",\"stock_dir\":\"{}\",\"manifest_device\":\"{}\",",
+            "\"bootcount\":\"{}\",\"status\":\"{}\",\"disabled\":\"{}\",\"log\":\"{}\"}}",
+            "}}"
+        ),
+        usb::ADB, usb::RNDIS,
+        selinux::STATE_ADDRS.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(","),
+        selinux::ENFORCE_OFFSET,
+        files::BACKGROUND, files::USAGE, files::SCREENCAP, files::FB_SHARED,
+        screen::WIDTH, screen::HEIGHT, screen::GRAB_TRIGGER, screen::STREAM_PORT,
+        natartos::MANIFEST_SCHEMA, natartos::REPO, natartos::STOCK_DIR, natartos::MANIFEST_DEVICE,
+        natartos::BOOTCOUNT, natartos::STATUS, natartos::DISABLED, natartos::LOG,
+    )
 }
 
 #[cfg(test)]
@@ -183,6 +257,33 @@ mod tests {
         assert_eq!(hex(&p), "550e04662a1b112740076501ec84");
     }
     fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{:02x}", x)).collect() }
+
+    #[test]
+    fn contract_json_is_valid() {
+        let json = device_contract_json();
+        assert!(json.starts_with('{') && json.ends_with('}'));
+        assert!(json.contains("\"acm,adb\""));
+        assert!(json.contains("\"0x17b6648\""));
+        assert!(json.contains("\"grom-labs/natartos\""));
+        assert!(json.contains("\"stream_port\":7777"));
+    }
+
+    #[test]
+    fn plan_and_json_are_consistent() {
+        let p = enable_plan();
+        let json = enable_plan_json();
+        // JSON must contain every handshake packet as hex
+        for pkt in &p.handshake {
+            assert!(json.contains(&hex(pkt)), "missing handshake pkt in JSON");
+        }
+        // JSON must contain every candidate as hex
+        for pkt in &p.candidates {
+            assert!(json.contains(&hex(pkt)), "missing candidate pkt in JSON");
+        }
+        assert_eq!(p.handshake.len(), 28); // 4 init + 24 probe
+        assert_eq!(p.candidates.len(), 16); // 0x60–0x6F
+        assert_eq!(p.init_count, 4);
+    }
 }
 
 pub mod contract;

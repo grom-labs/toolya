@@ -7,6 +7,7 @@ web/dist/
 core/pkg/
 core/pkg-node/
 web/vendor/
+web/public/fb_stream
 worker/node_modules/
 worker/dist/
 worker/.wrangler/
@@ -26,3 +27,4 @@ PLAN.md
 *.pem
 *.testkey*
 .dev.vars
+.cert/

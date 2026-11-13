@@ -3,6 +3,9 @@ name = "toolya-core"
 version = "0.0.1"
 edition = "2021"
 description = "DUML protocol core for DJI Goggles 3 (native + wasm)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib"]

@@ -21,7 +21,8 @@ screen, the usage counters, and a handful of desk-development tweaks.
 
 - A **root shell** on the goggles — a one-shot command REPL with a sticky `cd` (the G3's
   *interactive* shell is broken on-device, so we run commands cleanly instead).
-- **Mirror the screen** (LiveView frame grab — work in progress).
+- **Mirror the screen** — 60 fps MJPEG streaming when the natartos display hook is active, with raw framebuffer grab as fallback.
+- **Install and manage natartos** — the on-device mod framework, one-click from the web UI with version management and rollback.
 - Read the **usage counters** — goggle power-ons and motor starts.
 - **Change the desk background** — drop in any photo, toolya converts it to the exact format.
 - Switch **USB mode** adb ↔ rndis; and (WIP) silence the fan, mute the boot sound,
@@ -29,12 +30,23 @@ screen, the usage counters, and a handful of desk-development tweaks.
 
 ## How it works
 
-- A **DUML** handshake + cmd_id scan flips adb on (the command flow was reversed from the
-  goggles; the enable cmd_id shifts between boots, so toolya scans for it).
-- The enable plan is computed in the browser by the **Rust core compiled to WASM** — no
-  origin server, no key. The client just sends/reads/detects over USB.
-- In the browser, [ya-webadb](https://github.com/yume-chan/ya-webadb) speaks adb over
-  WebUSB; root comes for free.
+The goggles run Android (aarch64) with `adbd` as root — but ADB is off by default.
+Toolya turns it on over USB using DJI's own internal protocol:
+
+1. **DUML handshake** — the host opens the USB bulk endpoint and sends a sequence of
+   DUML init packets. The goggles reply, confirming the link.
+2. **cmd_id scan** — the exact command that enables ADB shifts between boots (0x64–0x6F).
+   Toolya sends each candidate until the goggles drop off USB — that's the enable.
+3. **ADB appears** — after ~5 seconds the goggles re-enumerate with an ADB interface.
+   Connect normally (`adb shell`); you're root.
+
+Everything runs client-side: the enable plan is computed by **Rust compiled to WASM** —
+no server, no key, no account. In the browser,
+[ya-webadb](https://github.com/yume-chan/ya-webadb) speaks ADB over WebUSB.
+
+For screen streaming, the [natartos](https://github.com/grom-labs/natartos) display hook
+writes the live framebuffer to a shared file; `fb_stream` (a small aarch64 binary pushed
+over ADB) JPEG-encodes it at up to 60 fps and streams frames back over the ADB pipe.
 
 ## Build
 
@@ -47,10 +59,14 @@ toolya-build run -- duml-show adb-enable        # print the raw enable packet
 toolya-build run -- info --from <getprop-dump>  # parse model/fw, mask serial (offline)
 toolya-build --wasm                             # build the core to WASM
 toolya-check                                     # one-shot CI: build + tests + web
+
+# device-side tools (aarch64, in gcc:13 container)
+make -C tools/fb_stream
 ```
 
 Layout: `core/` (Rust DUML, native + WASM) · `cli/` (Rust) · `web/` (WebUSB enable + shell) ·
-`worker/` (Cloudflare Worker that serves the web app — static assets only, no API).
+`worker/` (Cloudflare Worker: serves the web app + anonymous telemetry + download proxy) ·
+`tools/` (device-side native binaries, cross-compiled for aarch64).
 
 ## Risks — read before using
 
@@ -81,9 +97,7 @@ until it has a WinUSB/libusb driver on the right interface.
 macOS and Linux need no driver. On Linux you may need a udev rule / to run the browser with
 USB access.
 
-## Scope / don't be weird
-
-These are real boundaries, not ceremony:
+## Scope
 
 - **Your own goggles.** Interoperability and local development only.
 - **No vendor code redistributed** — no firmware, binaries, or unpacked `.sh`. Scrub

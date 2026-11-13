@@ -8,7 +8,8 @@ working, and respect the scope.
 - `core/` — Rust, the DUML protocol core. Compiles to a native lib **and** to WASM.
 - `cli/` — Rust CLI (`toolya`), the full toolkit.
 - `web/` — the WebUSB browser app (Vite + TypeScript); the thin client most people use.
-- `worker/` — the Cloudflare Worker that serves `web/` (static assets) + two tiny endpoints.
+- `worker/` — the Cloudflare Worker that serves `web/` (static assets) + API endpoints
+  (anonymous telemetry, rooted-count badge, natartos download proxy).
 - `tools/gen_contract.py` — **codegen**: `core/src/contract.rs` is generated from a
   maintainer-held device-facts file. Treat `contract.rs` as source; don't hand-edit it,
   and don't expect to regenerate it without that file (it's not in this repo).

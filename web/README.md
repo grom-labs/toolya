@@ -10,8 +10,8 @@ NAS only builds it. WebUSB needs https or localhost; Windows needs WinUSB (Zadig
    (`src/wasm.ts`) — no server, no key.
 2. **Connect** — ya-webadb authenticates and opens a root shell (adbd runs as uid 0);
    terminal is a line-editor REPL on xterm.js (`src/adb.ts`, `src/main.ts`).
-3. **Usage counters** — power-ons / motor starts from a `/data` config. 🔬 file/keys
-   not identified yet (placeholder probe in `readUsage`).
+3. **Usage counters** — power-ons / motor starts from `/data/glasses_statistics.json`
+   (`glasses_boot_cnt`, `motor_start_cnt`). Read over adb after connect.
 
 ## Build / run (in the toolya-build container)
     docker exec -w /work/web toolya-build npm run build       # -> dist/

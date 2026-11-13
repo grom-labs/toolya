@@ -31,15 +31,29 @@ fn shell(dev: &mut ADBUSBDevice, cmd: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// Scan the known selinux_state addresses and set the enforce byte.
-/// `byte` is "0x00" (permissive) or "0x01" (enforcing). uint32@state is
-/// 0x01000100 (enforcing) or 0x01000000 (permissive); we match either and write.
-fn set_shell(byte: &str) -> String {
+/// Shell command to scan known selinux_state addresses and set the enforce byte.
+/// `byte` is "0x00" (permissive) or "0x01" (enforcing).
+pub fn set_shell(byte: &str) -> String {
     let addrs = STATE_ADDRS.join(" ");
     format!(
         "for A in {addrs}; do V=$(busybox devmem $A 32 2>/dev/null) || continue; \
 case \"$V\" in 0x01000100|0x01000000) busybox devmem $(printf 0x%X $((A+{ENFORCE_OFFSET}))) 8 {byte}; break;; esac; done; getenforce"
     )
+}
+
+/// Ensure SELinux is Permissive on the device. Returns Ok(true) if it was already
+/// permissive, Ok(false) if we had to toggle it. Err on failure.
+pub fn ensure_permissive(dev: &mut ADBUSBDevice) -> Result<bool, String> {
+    let status = shell(dev, "getenforce")?;
+    if status.trim().eq_ignore_ascii_case("Permissive") {
+        return Ok(true);
+    }
+    let result = shell(dev, &set_shell("0x00"))?;
+    if result.trim().eq_ignore_ascii_case("Permissive") {
+        Ok(false)
+    } else {
+        Err(format!("failed to set SELinux permissive (got: {})", result.trim()))
+    }
 }
 
 pub fn run(args: &[String]) {

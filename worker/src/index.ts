@@ -17,14 +17,38 @@ export interface Env {
 
 const DRY_FLAG = '<script>window.__TOOLYA_DRY_RUN__=1;</scr' + "ipt>";
 
-// In dry-run, inject a flag into the page <head> so the client runs in demo mode.
-async function withDryRun(res: Response, env: Env): Promise<Response> {
-  if (env.DRY_RUN !== "true") return res;
-  if (!(res.headers.get("content-type") || "").includes("text/html")) return res;
-  const html = (await res.text()).replace("</head>", DRY_FLAG + "</head>");
+// CSP for the HTML pages. Inline styles/scripts are used throughout; WASM needs
+// wasm-unsafe-eval. External origins: Google Fonts (style+font), api.github.com
+// (release lookups), ko-fi (donation iframe). No external script origins.
+const CSP = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "img-src 'self' data:",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
+  "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+  "connect-src 'self' https://api.github.com",
+  "frame-src https://ko-fi.com",
+].join("; ");
+
+// Serve a static asset with security headers; inject the dry-run flag into HTML pages.
+async function serveAsset(res: Response, env: Env): Promise<Response> {
+  const isHtml = (res.headers.get("content-type") || "").includes("text/html");
+  if (!isHtml) {
+    const h = new Headers(res.headers);
+    h.set("x-content-type-options", "nosniff");
+    return new Response(res.body, { status: res.status, headers: h });
+  }
+  let html = await res.text();
+  if (env.DRY_RUN === "true") html = html.replace("</head>", DRY_FLAG + "</head>");
   const h = new Headers(res.headers);
   h.delete("content-length");
   h.delete("content-encoding"); // body is now decoded
+  h.set("x-content-type-options", "nosniff");
+  h.set("content-security-policy", CSP);
+  h.set("referrer-policy", "strict-origin-when-cross-origin");
   return new Response(html, { status: res.status, headers: h });
 }
 
@@ -39,6 +63,8 @@ const STAT_EVENTS = new Set([
   "enable_fail",
   "connect_ok",
   "connect_fail",
+  "mod_install",
+  "device_report",
 ]);
 
 const clamp = (v: unknown, n: number): string =>
@@ -70,11 +96,36 @@ async function rootedCount(env: Env): Promise<number | null> {
   }
 }
 
+const CORS_ORIGINS = new Set(["https://toolya.dev", "http://localhost:5173"]);
+
+function corsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get("origin") || "";
+  if (!CORS_ORIGINS.has(origin)) return {};
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "access-control-max-age": "86400",
+  };
+}
+
+function withCors(res: Response, req: Request): Response {
+  const ch = corsHeaders(req);
+  if (!Object.keys(ch).length) return res;
+  const h = new Headers(res.headers);
+  for (const [k, v] of Object.entries(ch)) h.set(k, v);
+  return new Response(res.body, { status: res.status, headers: h });
+}
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (url.pathname === "/healthz") return new Response("ok");
+
+    if (req.method === "OPTIONS" && url.pathname.startsWith("/api/")) {
+      return new Response(null, { status: 204, headers: corsHeaders(req) });
+    }
 
     // Anonymous success/failure + platform stat. Fire-and-forget: always 204,
     // never blocks the client, stores nothing identifying (no IP, serial, device id).
@@ -99,20 +150,20 @@ export default {
       } catch {
         /* ignore malformed beacons */
       }
-      return new Response(null, { status: 204 });
+      return withCors(new Response(null, { status: 204 }), req);
     }
 
     // Public rooted-count badge. Cached 5 min at the edge to spare the SQL API.
     if (url.pathname === "/api/rooted" && req.method === "GET") {
       const cache = caches.default;
       const hit = await cache.match(req);
-      if (hit) return hit;
+      if (hit) return withCors(hit, req);
       const n = await rootedCount(env);
       const resp = new Response(JSON.stringify(n == null ? {} : { rooted: n }), {
         headers: { "content-type": "application/json", "cache-control": "public, max-age=300" },
       });
       ctx.waitUntil(cache.put(req, resp.clone()));
-      return resp;
+      return withCors(resp, req);
     }
 
     // same-origin proxy for natartos release-asset downloads (GitHub assets don't send
@@ -133,20 +184,24 @@ export default {
         target.pathname.startsWith("/grom-labs/natartos/releases/");
       if (!ok) return new Response("forbidden", { status: 403 });
       const up = await fetch(target.toString(), { headers: { "User-Agent": "toolya" }, redirect: "follow" });
-      return new Response(up.body, {
+      return withCors(new Response(up.body, {
         status: up.status,
-        headers: { "content-type": up.headers.get("content-type") || "application/octet-stream" },
-      });
+        headers: {
+          "content-type": up.headers.get("content-type") || "application/octet-stream",
+          "x-content-type-options": "nosniff",
+          "content-disposition": "attachment",
+        },
+      }), req);
     }
 
     // the tool pages (root + natartos view) are the same app.html; the client routes by path
     if (["/app", "/app/", "/natartos", "/natartos/"].includes(url.pathname)) {
       const u = new URL(req.url);
       u.pathname = "/app.html";
-      return withDryRun(await env.ASSETS.fetch(new Request(u, req)), env);
+      return serveAsset(await env.ASSETS.fetch(new Request(u, req)), env);
     }
 
     // everything else: landing + static assets (unknown paths fall back to index.html)
-    return withDryRun(await env.ASSETS.fetch(req), env);
+    return serveAsset(await env.ASSETS.fetch(req), env);
   },
 } satisfies ExportedHandler<Env>;

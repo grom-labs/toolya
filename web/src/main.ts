@@ -1,11 +1,12 @@
 import "@xterm/xterm/css/xterm.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { enableAdb } from "./goggles";
+import { enableAdb, isKnownDevice } from "./goggles";
 import { stat } from "./stat";
-import { fetchLatestRelease, installFromRelease, type Release } from "./natartos";
-import { connectAdb, readUsage, run, runInDir, setUsbMode, USB_CFG, setSelinux, getSelinux, natartosStatus, natartosSafe, pushFile, pullFile, BG_PATH } from "./adb";
+import { fetchLatestRelease, loadManifest, installFromRelease, type Release, type Manifest, type CustomMod } from "./natartos";
+import { connectAdb, readUsage, run, runInDir, setUsbMode, usbCfgString, setSelinux, getSelinux, natartosStatus, natartosSafe, pushFile, pullFile, BG_PATH } from "./adb";
 import { toScreenBmp, previewInto, bgraToCanvas } from "./image";
+import { startStream, type StreamHandle } from "./stream";
 import type { Adb } from "@yume-chan/adb";
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -17,6 +18,7 @@ function log(s: string) {
 
 let adb: Adb | null = null;
 let term: Terminal | null = null;
+let heartbeat: ReturnType<typeof setInterval> | null = null;
 
 // Demo mode (set by the Worker when DRY_RUN): simulate enable/connect, no real device,
 // no stats — just to preview the UI. See worker/src/index.ts.
@@ -215,14 +217,28 @@ $("btn-enable").addEventListener("click", async () => {
     return;
   }
   try {
-    await enableAdb(log);
+    const info = await enableAdb(log);
     stat("enable_ok");
-    setPrimary("connect"); // enable done → nudge the user to Connect
+    setPrimary("connect");
+    if (!isKnownDevice(info)) showUntestedNotice(info);
   } catch (e) {
     stat("enable_fail", { stage: classifyErr(e) });
     log("enable: " + friendlyError(e));
   }
 });
+
+function showUntestedNotice(info: { productName: string; productId: number }) {
+  const el = $("untested");
+  el.hidden = false;
+  $("untested-name").textContent = info.productName || `PID 0x${info.productId.toString(16)}`;
+  $("untested-send").addEventListener("click", () => {
+    stat("device_report", {
+      stage: info.productName || "unknown",
+      reason: `pid:0x${info.productId.toString(16)}`,
+    });
+    el.innerHTML = '<span class="muted">Report sent — thank you.</span>';
+  }, { once: true });
+}
 
 $("btn-connect").addEventListener("click", async () => {
   if (DRY) {
@@ -237,7 +253,6 @@ $("btn-connect").addEventListener("click", async () => {
     setStatus("connected · root", "ok");
     $("devinfo").textContent = `${adb.banner.model} · ${adb.banner.product}`;
     $("usage-hdr").hidden = false;
-    btn("btn-usage", false);
     btn("btn-disconnect", false);
     btn("btn-connect", true);
     btn("usb-adb", false);
@@ -250,6 +265,7 @@ $("btn-connect").addEventListener("click", async () => {
     btn("scr-grab", false);
     if (bgBytes) btn("bg-apply", false);
     void startTerminal(adb);
+    startHeartbeat();
     stat("connect_ok");
     rootFx();
     setPrimary("none");
@@ -274,7 +290,6 @@ function fakeConnect() {
   $("usage-hdr").hidden = false;
   $("stat-power").textContent = "123";
   $("stat-motor").textContent = "957";
-  btn("btn-usage", false);
   btn("btn-disconnect", false);
   btn("btn-connect", true);
   btn("usb-adb", false);
@@ -386,29 +401,108 @@ $("nat-safe").addEventListener("change", async (e) => {
 });
 // natartos install: gated on a real release existing (none yet → stays inert).
 let natRelease: Release | null = null;
+let natManifest: Manifest | null = null;
+const customMods: CustomMod[] = [];
 function updateNatInstall() {
-  btn("nat-install", !(adb && natRelease));
+  btn("nat-install", !((DRY || adb) && natRelease && natManifest));
 }
-fetchLatestRelease().then((rel) => {
-  natRelease = rel;
+function renderMods(m: Manifest) {
+  const list = $("mod-list");
+  list.replaceChildren();
+  for (const mod of m.mods ?? []) {
+    const row = document.createElement("label");
+    row.className = "modrow";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = mod.id;
+    cb.checked = mod.default !== false;
+    const text = document.createElement("span");
+    const name = document.createElement("span");
+    name.className = "mname";
+    name.textContent = mod.name || mod.id; // textContent — never innerHTML
+    text.appendChild(name);
+    if (mod.description) {
+      const d = document.createElement("span");
+      d.className = "mdesc";
+      d.textContent = mod.description;
+      text.appendChild(d);
+    }
+    row.append(cb, text);
+    if (mod.provides) {
+      const tag = document.createElement("span");
+      tag.className = "mtag";
+      tag.textContent = mod.provides;
+      row.appendChild(tag);
+    }
+    list.appendChild(row);
+  }
+  $("mod-picker").hidden = (m.mods ?? []).length === 0 && customMods.length === 0;
+}
+function setVerOption(label: string) {
   const sel = $("nat-ver") as HTMLSelectElement;
-  sel.innerHTML = rel
-    ? `<option>${rel.tag_name}${rel.prerelease ? " (pre)" : ""}</option>`
-    : "<option>no releases yet</option>";
+  sel.replaceChildren();
+  sel.add(new Option(label)); // new Option → textContent, never innerHTML
+}
+if (DRY) {
+  // demo: a fake release + sample mods so the selector is visible without a real release
+  natRelease = { tag_name: "v0.3.0-demo", prerelease: false, assets: [] };
+  natManifest = {
+    schema: 1,
+    natartos_version: "v0.3.0-demo",
+    init_rc: { device_path: "/vendor/etc/init/dji_glasses_custom.rc", content: "" },
+    loader: { file: "natartos_loader.so", device_path: "/vendor/lib64/natartos_loader.so", sha256: "" },
+    mods: [
+      { id: "screen", name: "Screen mirror", description: "Grab/stream the display over adb (LiveView hook).", provides: "screen", default: true, file: "mod_screen.so", device_path: "/vendor/natartos/mods/mod_screen.so", sha256: "" },
+      { id: "background", name: "Custom wallpaper", description: "Show your own background image on the display.", provides: "background", default: true, file: "mod_bg.so", device_path: "/vendor/natartos/mods/mod_bg.so", sha256: "" },
+      { id: "splash", name: "Boot splash", description: "Replace the boot splash screen.", provides: "splash", default: false, file: "mod_splash.so", device_path: "/vendor/natartos/mods/mod_splash.so", sha256: "" },
+      { id: "fan", name: "Fan quiet", description: "Lower fan speed for desk use (with a temp guard).", default: false, file: "mod_fan.so", device_path: "/vendor/natartos/mods/mod_fan.so", sha256: "" },
+    ],
+  };
+  setVerOption("v0.3.0-demo");
+  renderMods(natManifest);
   updateNatInstall();
+} else {
+  fetchLatestRelease().then(async (rel) => {
+    natRelease = rel;
+    setVerOption(rel ? `${rel.tag_name}${rel.prerelease ? " (pre)" : ""}` : "no releases yet");
+    if (rel) {
+      try {
+        natManifest = await loadManifest(rel);
+        renderMods(natManifest);
+      } catch {
+        /* manifest unavailable — install stays gated */
+      }
+    }
+    updateNatInstall();
+  });
+}
+$("mod-custom").addEventListener("change", async (e) => {
+  const files = (e.target as HTMLInputElement).files;
+  if (!files) return;
+  for (const f of Array.from(files)) {
+    customMods.push({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+  }
+  $("mod-custom-list").textContent = customMods.length ? `custom: ${customMods.map((c) => c.name).join(", ")} (untrusted)` : "";
+  $("mod-picker").hidden = false;
 });
 $("nat-install").addEventListener("click", async () => {
-  if (!natRelease) return;
-  if (!confirm(`Install natartos ${natRelease.tag_name}? Writes to /vendor and survives reboot. A boot-loop auto-disables mods (brick-prevention).`)) return;
+  if (!natRelease || !natManifest) return;
+  const modIds = Array.from(
+    $("mod-list").querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked'),
+  ).map((cb) => cb.value);
+  const total = modIds.length + customMods.length;
+  if (!confirm(`Install natartos ${natRelease.tag_name} with ${total} mod(s)? Writes to /vendor and survives reboot. A boot-loop auto-disables mods (brick-prevention).`)) return;
   if (DRY) {
-    log(`demo: would install natartos ${natRelease.tag_name} (no real device).`);
+    log(`demo: would install natartos ${natRelease.tag_name} (${total} mod(s)) — no real device.`);
     return;
   }
   if (!adb) return;
   btn("nat-install", true);
   log(`installing natartos ${natRelease.tag_name}…`);
   try {
-    await installFromRelease(adb, natRelease, log);
+    const installedIds = await installFromRelease(adb, natRelease, natManifest, { modIds, custom: customMods }, log);
+    // anonymous per-mod telemetry (release mods only; custom mods never reported)
+    for (const id of installedIds) stat("mod_install", { stage: natRelease.tag_name, reason: id });
     void refreshNatartos();
   } catch (e) {
     reportAdbError("natartos install", e);
@@ -417,53 +511,64 @@ $("nat-install").addEventListener("click", async () => {
   }
 });
 
-// --- screen (LiveView frame grab over adb) ---
+// --- screen (LiveView frame grab / live stream over adb) ---
 const scrPath = $("scr-path") as HTMLInputElement;
-let scrTimer: ReturnType<typeof setInterval> | null = null;
+const scrFps = $("scr-fps");
+let stream: StreamHandle | null = null;
 
 const FRAME_BYTES = 1920 * 1080 * 4; // 8294400, raw BGRA
 
 async function grabScreen() {
   if (!adb) return;
   try {
-    // 1. trigger the frame hook (hook_debug.so dumps the current DMA-buf on SIGWINCH).
-    //    hook v4 uses screencap.log as a global debug sink (every LD_PRELOAD'd process
-    //    appends to it), so we don't gate on log=="OK" — we gate on the frame itself.
     await run(adb, "kill -WINCH $(pidof dji_glasses)");
-    await new Promise((r) => setTimeout(r, 300));
-    // 2. pull the raw BGRA frame; a correct 8294400-byte frame IS the success signal
+    await new Promise((r) => setTimeout(r, 150));
     const bytes = await pullFile(adb, scrPath.value.trim());
     if (bytes.length !== FRAME_BYTES) {
-      // frame wrong/missing — surface the hook's log tail to diagnose (hook loaded?
-      // dji_glasses running? GOT patched?)
       let tail = "";
       try {
         tail = (await run(adb, "tail -c 400 /data/local/tmp/screencap.log")).trim();
       } catch { /* log may not exist */ }
       log(`screen: got ${bytes.length}B (expected ${FRAME_BYTES}). hook log tail: ${tail || "(empty)"}`);
-      stopAuto();
       return;
     }
     bgraToCanvas(bytes, $("scr-canvas") as HTMLCanvasElement);
     log(`screen frame ok (${(bytes.length / 1e6).toFixed(1)} MB)`);
   } catch (e) {
     reportAdbError("screen grab", e);
-    stopAuto();
   }
 }
-function stopAuto() {
-  if (scrTimer) {
-    clearInterval(scrTimer);
-    scrTimer = null;
-  }
+
+function stopStream() {
+  if (stream) { stream.stop(); stream = null; }
   ($("scr-auto") as HTMLInputElement).checked = false;
+  if (scrFps) scrFps.textContent = "";
 }
+
 $("scr-grab").addEventListener("click", () => void grabScreen());
-$("scr-auto").addEventListener("change", (e) => {
+$("scr-auto").addEventListener("change", async (e) => {
   if ((e.target as HTMLInputElement).checked) {
-    scrTimer = setInterval(() => void grabScreen(), 1000);
+    if (!adb) { stopStream(); return; }
+    try {
+      stream = await startStream(
+        adb,
+        $("scr-canvas") as HTMLCanvasElement,
+        (fps, mode) => {
+          if (scrFps) scrFps.textContent = `${fps.toFixed(1)} fps · ${mode}`;
+        },
+        (err) => {
+          reportAdbError("stream", err);
+          stopStream();
+        },
+      );
+      log(`stream started (${stream.mode} mode)`);
+    } catch (e) {
+      reportAdbError("stream start", e);
+      stopStream();
+    }
   } else {
-    stopAuto();
+    stopStream();
+    log("stream stopped");
   }
 });
 
@@ -475,6 +580,7 @@ let bgBytes: Uint8Array<ArrayBuffer> | null = null;
 async function bgUpdate() {
   const f = bgFile.files?.[0];
   if (!f) return;
+  $("bg-fname").textContent = f.name;
   const fit = bgFit.value as "cover" | "contain";
   try {
     await previewInto($("bg-preview") as HTMLCanvasElement, f, fit);
@@ -514,7 +620,7 @@ $("bg-apply").addEventListener("click", async () => {
 async function switchUsb(mode: "adb" | "rndis") {
   if (!adb) return;
   if (!confirm(`Switch USB to ${mode}? This re-enumerates USB and drops the connection.`)) return;
-  log(`switching USB → ${mode} (sys.usb.config = ${USB_CFG[mode]})…`);
+  log(`switching USB → ${mode} (sys.usb.config = ${await usbCfgString(mode)})…`);
   await setUsbMode(adb, mode);
   if (mode === "rndis") {
     log("RNDIS requested — on this machine bring up usb0:");
@@ -525,7 +631,6 @@ async function switchUsb(mode: "adb" | "rndis") {
   log("USB re-enumerated — connection dropped.");
   await disconnect();
 }
-$("btn-usage").addEventListener("click", () => void refreshUsage());
 $("btn-copy").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText($("log").textContent ?? "");
@@ -535,7 +640,23 @@ $("btn-copy").addEventListener("click", async () => {
   }
 });
 
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeat = setInterval(async () => {
+    if (!adb) return;
+    try {
+      await run(adb, "echo ok");
+    } catch (e) {
+      if (isDisconnect(e)) void disconnect();
+    }
+  }, 30_000);
+}
+function stopHeartbeat() {
+  if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+}
+
 async function disconnect() {
+  stopHeartbeat();
   try { term?.dispose(); } catch { /* ignore */ }
   term = null;
   $("term").innerHTML = "";
@@ -550,11 +671,10 @@ async function disconnect() {
   $("usage-hdr").hidden = true;
   $("stat-power").textContent = "—";
   $("stat-motor").textContent = "—";
-  btn("btn-usage", true);
   btn("btn-disconnect", true);
   btn("usb-adb", true);
   btn("usb-rndis", true);
-  stopAuto();
+  stopStream();
   btn("scr-grab", true);
   btn("bg-apply", true);
   if (canUsb) btn("btn-connect", false);

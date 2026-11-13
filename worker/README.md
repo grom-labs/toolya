@@ -1,8 +1,9 @@
 # toolya/worker — edge deploy (Cloudflare)
 
-The Worker serves the web app (static assets) only — **no API, no key**. The DUML
-enable plan is computed in the browser by the Rust core compiled to WASM, so there is
-no origin server to run.
+The Worker serves the web app (static assets) and a few small endpoints: anonymous
+telemetry (`/api/stat` → Analytics Engine), a public rooted-count badge (`/api/rooted`),
+and a CORS download proxy for natartos release assets (`/api/dl`). The DUML enable plan
+is computed in the browser by the Rust core compiled to WASM — no origin server needed.
 
 ## Build / check (no account needed)
     npm install
@@ -20,5 +21,5 @@ Before a domain is attached you can also deploy to `toolya.workers.dev` for a sm
 
 Telemetry is disabled in the scripts (`WRANGLER_SEND_METRICS=false`).
 
-Since the Worker only serves static assets, you can equally host `web/dist` on
-Cloudflare Pages or any static host.
+The static assets (`web/dist`) can also be hosted on Cloudflare Pages or any
+static host, but the API endpoints (`/api/*`) require the Worker.

@@ -10,7 +10,7 @@
 //!
 //! Subcommands:
 //!   versions                 list natartos releases
-//!   install [--version <t>] [--local <dir>] [--yes]
+//!   install [--version <t>] [--local <dir>] [--mods <ids>] [--yes]
 //!   uninstall [--yes]        restore stock from on-device backups
 //!   status                   bootcount / kill-switch / log
 //!   safe [on|off]            kill-switch toggle
@@ -24,18 +24,17 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-const GITHUB_REPO: &str = "grom-labs/natartos";
-const SUPPORTED_SCHEMA: u32 = 1;
+use toolya_core::contract::natartos as NC;
 
-// toolya install conventions (not in the manifest): where backups and anti-brick
-// runtime state live. The loader/mod/.rc paths all come from the manifest.
-const STOCK_DIR: &str = "/vendor/natartos/stock";
-const MANIFEST_DEVICE_PATH: &str = "/vendor/natartos/manifest.json"; // applied manifest, for uninstall
-const DEFAULT_LOADER_PATH: &str = "/vendor/lib64/natartos_loader.so"; // uninstall fallback
-const BOOTCOUNT_PATH: &str = "/data/.natartos_bootcount";
-const STATUS_PATH: &str = "/data/.natartos_status";
-const DISABLED_PATH: &str = "/data/.natartos_disabled";
-const LOG_PATH: &str = "/data/local/tmp/natartos.log";
+const GITHUB_REPO: &str = NC::REPO;
+const SUPPORTED_SCHEMA: u32 = NC::MANIFEST_SCHEMA;
+const STOCK_DIR: &str = NC::STOCK_DIR;
+const MANIFEST_DEVICE_PATH: &str = NC::MANIFEST_DEVICE;
+const DEFAULT_LOADER_PATH: &str = NC::DEFAULT_LOADER;
+const BOOTCOUNT_PATH: &str = NC::BOOTCOUNT;
+const STATUS_PATH: &str = NC::STATUS;
+const DISABLED_PATH: &str = NC::DISABLED;
+const LOG_PATH: &str = NC::LOG;
 
 // --- manifest (contract: docs/natartos-manifest.md) ---
 
@@ -50,6 +49,8 @@ struct Manifest {
     min_toolya: String,
     init_rc: InitRc,
     loader: Artifact,
+    #[serde(default)]
+    files: Vec<Artifact>,
     #[serde(default)]
     mods: Vec<Artifact>,
     #[serde(default)]
@@ -72,6 +73,14 @@ struct Artifact {
     mode: String,
     #[serde(default)]
     sha256: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    default: bool,
 }
 
 fn default_mode() -> String {
@@ -215,7 +224,7 @@ fn resolve_local(dir: &Path) -> Result<Resolved, String> {
     fs::create_dir_all(&flat).map_err(|e| format!("mkdir tmp: {e}"))?;
 
     let find = |name: &str| -> Option<PathBuf> {
-        for cand in [dir.join(name), dir.join("src").join(name), dir.join("mods").join(name)] {
+        for cand in [dir.join(name), dir.join("src").join(name), dir.join("mods").join(name), dir.join("deploy").join(name)] {
             if cand.exists() {
                 return Some(cand);
             }
@@ -229,6 +238,9 @@ fn resolve_local(dir: &Path) -> Result<Resolved, String> {
         Ok(())
     };
     place(&manifest.loader)?;
+    for f in &manifest.files {
+        place(f)?;
+    }
     for m in &manifest.mods {
         place(m)?;
     }
@@ -252,6 +264,7 @@ fn resolve_release(tag: Option<&str>) -> Result<Resolved, String> {
 
     // then each file it names
     let mut need: Vec<&Artifact> = vec![&manifest.loader];
+    need.extend(manifest.files.iter());
     need.extend(manifest.mods.iter());
     for art in need {
         println!("  downloading {}...", art.file);
@@ -318,7 +331,8 @@ pub fn run(args: &[String]) {
             let confirmed = args.iter().any(|a| a == "--yes");
             let local = flag_value(args, "--local").map(PathBuf::from);
             let version = flag_value(args, "--version");
-            cmd_install(confirmed, local.as_deref(), version.as_deref());
+            let mods = flag_value(args, "--mods");
+            cmd_install(confirmed, local.as_deref(), version.as_deref(), mods.as_deref());
         }
         "uninstall" => cmd_uninstall(args.iter().any(|a| a == "--yes")),
         "status" => cmd_status(),
@@ -326,8 +340,9 @@ pub fn run(args: &[String]) {
         _ => {
             eprintln!("usage: toolya natartos <versions|install|uninstall|status|safe>");
             eprintln!("  versions                        list natartos releases");
-            eprintln!("  install [--version <tag>] [--local <dir>] [--yes]");
+            eprintln!("  install [--version <tag>] [--local <dir>] [--mods <ids>] [--yes]");
             eprintln!("                                  fetch manifest+artifacts, verify, push");
+            eprintln!("      --mods id1,id2              install only these mods (default: all)");
             eprintln!("  uninstall [--yes]               restore stock from device backups");
             eprintln!("  status                          read status from device");
             eprintln!("  safe [on|off]                   toggle kill-switch");
@@ -376,7 +391,7 @@ fn cmd_versions() {
     println!("install a tag:         toolya natartos install --version <tag>");
 }
 
-fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>) {
+fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>, mods_filter: Option<&str>) {
     // 1. resolve the manifest + artifact files (download or local)
     let resolved = match local_dir {
         Some(dir) => {
@@ -402,7 +417,23 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>)
     };
     let m = &resolved.manifest;
 
-    // 2. verify every artifact's sha256 BEFORE touching the device
+    // 2. filter mods: --mods id1,id2 or all if omitted
+    let selected_mods: Vec<&Artifact> = match mods_filter {
+        Some(filter) => {
+            let wanted: Vec<&str> = filter.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let available_ids: Vec<&str> = m.mods.iter().map(|a| a.id.as_str()).collect();
+            for w in &wanted {
+                if !available_ids.contains(w) {
+                    eprintln!("Unknown mod `{w}`. Available: {}", available_ids.join(", "));
+                    exit(1);
+                }
+            }
+            m.mods.iter().filter(|a| wanted.contains(&a.id.as_str())).collect()
+        }
+        None => m.mods.iter().collect(),
+    };
+
+    // 3. verify every artifact's sha256 BEFORE touching the device
     println!("Verifying artifacts...");
     let loader_local = match verify(&resolved.dir, &m.loader, resolved.from_release) {
         Ok(p) => p,
@@ -411,10 +442,20 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>)
             exit(1);
         }
     };
-    let mut mod_locals = Vec::new();
-    for art in &m.mods {
+    let mut file_locals = Vec::new();
+    for art in &m.files {
         match verify(&resolved.dir, art, resolved.from_release) {
-            Ok(p) => mod_locals.push((art.clone(), p)),
+            Ok(p) => file_locals.push((art.clone(), p)),
+            Err(e) => {
+                eprintln!("FATAL: {e}");
+                exit(1);
+            }
+        }
+    }
+    let mut mod_locals = Vec::new();
+    for art in &selected_mods {
+        match verify(&resolved.dir, art, resolved.from_release) {
+            Ok(p) => mod_locals.push(((*art).clone(), p)),
             Err(e) => {
                 eprintln!("FATAL: {e}");
                 exit(1);
@@ -433,14 +474,26 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>)
         exit(1);
     }
 
-    // 3. confirmation
+    // 4. confirmation
     if !confirmed {
         eprintln!("⚠ natartos install writes to /vendor on your goggles.");
         eprintln!("  version: {}", m.natartos_version);
         eprintln!("  device:  {}", m.device);
         eprintln!("  loader:  {} → {}", m.loader.file, m.loader.device_path);
-        for a in &m.mods {
-            eprintln!("  mod:     {} → {}", a.file, a.device_path);
+        for a in &m.files {
+            eprintln!("  file:    {} → {}", a.file, a.device_path);
+        }
+        if mods_filter.is_some() {
+            let skipped = m.mods.len() - selected_mods.len();
+            if skipped > 0 {
+                eprintln!("  ({skipped} mod(s) skipped by --mods filter)");
+            }
+        }
+        for a in &selected_mods {
+            let label = if a.name.is_empty() { &a.id } else { &a.name };
+            let def = if a.default { " [default]" } else { "" };
+            let desc = if a.description.is_empty() { String::new() } else { format!(" — {}", a.description) };
+            eprintln!("  mod:     {} ({}{}{}) → {}", a.file, label, def, desc, a.device_path);
         }
         eprintln!("\nRe-run with --yes to proceed:  toolya natartos install --yes");
         exit(1);
@@ -471,7 +524,19 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>)
         }
     }
 
-    // 5. apply
+    // 5. unlock vendor: SELinux must be permissive for /vendor writes
+    print!("Checking SELinux... ");
+    match crate::selinux::ensure_permissive(&mut dev) {
+        Ok(true) => println!("already Permissive"),
+        Ok(false) => println!("toggled to Permissive (session-only, resets on reboot)"),
+        Err(e) => {
+            eprintln!("\nFATAL: {e}");
+            eprintln!("Cannot write to /vendor without SELinux permissive.");
+            eprintln!("If this is a new kernel build, its selinux_state address may be unknown.");
+            exit(1);
+        }
+    }
+
     println!("Remounting /vendor rw...");
     let _ = shell(&mut dev, "mount -o remount,rw /vendor");
     let _ = shell(&mut dev, &format!("mkdir -p {STOCK_DIR}"));
@@ -492,6 +557,16 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>)
         exit(1);
     }
     let _ = shell(&mut dev, &format!("chmod {} {}", m.loader.mode, m.loader.device_path));
+
+    for (art, local) in &file_locals {
+        println!("Pushing {}...", art.file);
+        let _ = shell(&mut dev, &format!("mkdir -p {}", parent_dir(&art.device_path)));
+        if let Err(e) = push_file(&mut dev, local, &art.device_path) {
+            eprintln!("FATAL: {e}");
+            exit(1);
+        }
+        let _ = shell(&mut dev, &format!("chmod {} {}", art.mode, art.device_path));
+    }
 
     for (art, local) in &mod_locals {
         println!("Pushing mod {}...", art.file);
@@ -523,8 +598,20 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>)
     let _ = shell(&mut dev, &format!("rm -f {BOOTCOUNT_PATH} {STATUS_PATH} {DISABLED_PATH}"));
     let _ = shell(&mut dev, "sync");
 
-    println!("\n=== natartos {} installed ===", m.natartos_version);
-    println!("Reboot to activate, then:  toolya natartos status");
+    // Activate immediately: init won't see the new .rc until reboot,
+    // so stop stock dji_glasses and run inject.sh now.
+    println!("Activating mods (no reboot needed)...");
+    let _ = shell(&mut dev, "setprop dji.glasses_service 0");
+    let _ = shell(&mut dev, "sleep 2");
+    let inject_path = m.files.iter()
+        .find(|a| a.file == "inject.sh")
+        .map(|a| a.device_path.as_str())
+        .unwrap_or("/vendor/natartos/inject.sh");
+    let _ = shell(&mut dev, &format!("nohup sh {inject_path} > /dev/null 2>&1 &"));
+
+    println!("\n=== natartos {} installed and activated ===", m.natartos_version);
+    println!("Mods are running. On next reboot they activate automatically.");
+    println!("Check with:  toolya natartos status");
 }
 
 fn parent_dir(path: &str) -> String {
@@ -551,6 +638,16 @@ fn cmd_uninstall(confirmed: bool) {
             exit(1);
         }
     };
+
+    print!("Checking SELinux... ");
+    match crate::selinux::ensure_permissive(&mut dev) {
+        Ok(true) => println!("already Permissive"),
+        Ok(false) => println!("toggled to Permissive"),
+        Err(e) => {
+            eprintln!("\nFATAL: {e}");
+            exit(1);
+        }
+    }
 
     let _ = shell(&mut dev, "mount -o remount,rw /vendor");
 

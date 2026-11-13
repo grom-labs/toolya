@@ -59,17 +59,20 @@ Be publishable and AGPL-clean.
 - ⬜ **Be in the FPV channels** where people look; Support visible.
 - **DoD:** anyone opens toolya.dev, plugs in, is root — free and open.
 
-## Phase 4 — natartos v0  ⬜ (post-launch: the ecosystem / moat)
+## Phase 4 — natartos v0  🔶 (post-launch: the ecosystem / moat)
 
 On-device framework, built on the now-confirmed primitives (persistence + code_exec +
 display_access).
 
-- ⬜ **Modloader** — formalize the vendor-init + LD_PRELOAD mechanism.
-- ⬜ **Brick-prevention** — boot-counter safe mode (skip mods after N failed boots; reset on a
-  healthy-boot signal), fail-open hooks, kill-switch file, stock backups for uninstall.
-- ⬜ **On-device SDK** — a thin `display_access` wrapper + package format + `install <file|URL>`.
-- ⬜ **First mods** — persistent background / simple overlay; then **Doom** (doomgeneric +
-  Freedoom, own repo, GPL) as the flagship.
+- 🔶 **Modloader** — trigger-based vendor-init + LD_PRELOAD mechanism designed and coded
+  (loader, inject.sh, natartos.rc). Needs hardware verification.
+- 🔶 **Brick-prevention** — boot-counter safe mode, fail-open hooks, kill-switch file,
+  stock backups for uninstall — all designed in DESIGN.md + coded. Needs rig reboot test.
+- 🔶 **Manifest contract (schema 1)** — toolya (web + CLI) consumes, natartos CI produces.
+  `files[]`, `--mods` selection, sha256 verification all wired.
+- 🔶 **First mods** — hook_debug (screen), background, mute, menu, audio, input, splash
+  (code in natartos repo, some compile). Doom (doomgeneric + Freedoom, own repo, GPL)
+  not started.
 - ⬜ **`toolya cast`** — stream a PC screen to the goggles via the fb_shared pipeline (host side).
 - **DoD:** one persistent mod installs and survives reboot, with brick-prevention proven.
 

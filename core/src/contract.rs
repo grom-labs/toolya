@@ -57,6 +57,19 @@ pub mod selinux {
     pub const ENFORCE_OFFSET: u64 = 1;
 }
 
+// ── natartos (on-device mod framework) ───────────────────────
+pub mod natartos {
+    pub const MANIFEST_SCHEMA: u32 = 1;
+    pub const REPO: &str = "grom-labs/natartos";
+    pub const STOCK_DIR: &str = "/vendor/natartos/stock";
+    pub const MANIFEST_DEVICE: &str = "/vendor/natartos/manifest.json";
+    pub const DEFAULT_LOADER: &str = "/vendor/lib64/natartos_loader.so";
+    pub const BOOTCOUNT: &str = "/data/.natartos_bootcount";
+    pub const STATUS: &str = "/data/.natartos_status";
+    pub const DISABLED: &str = "/data/.natartos_disabled";
+    pub const LOG: &str = "/data/local/tmp/natartos.log";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

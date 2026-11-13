@@ -108,8 +108,6 @@ button:disabled,input:disabled,select:disabled,.switch input:disabled{opacity:.4
 .banner .x:hover{color:var(--fg)}
 .banner .srow{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 /* sub-panel inside a section */
-.sub{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:14px;min-width:0}
-.sub h3{margin:0 0 12px;font-size:13px;font-weight:600}
 .natlink{display:flex;align-items:center;gap:14px;text-decoration:none;padding:16px 18px}
 .natlink-i{display:grid;place-items:center;width:38px;height:38px;border-radius:9px;background:var(--panel2);color:var(--accent);flex:none}
 .natlink-i svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
@@ -119,6 +117,14 @@ button:disabled,input:disabled,select:disabled,.switch input:disabled{opacity:.4
 .back{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:13px;text-decoration:none;margin-right:4px}
 .back:hover{color:var(--fg)}
 .back svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.modpick{display:grid;gap:8px;margin-top:4px;padding-top:12px;border-top:1px solid var(--hair)}
+.modpick .sect-label{margin:0}
+.modrow{display:flex;gap:10px;align-items:flex-start;padding:6px 0}
+.modrow input{margin-top:3px;flex:none}
+.modrow .mname{font-weight:500}
+.modrow .mdesc{display:block;color:var(--muted);font-size:12px}
+.modrow .mtag{margin-left:auto;font-size:11px;color:var(--muted);font-family:var(--mono);white-space:nowrap}
+.btn.file{cursor:pointer;position:relative}
 
 /* console: toolbar + terminal + log as one unit */
 .console{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--well);overflow:hidden;box-shadow:0 24px 60px -30px rgba(0,0,0,.9)}
@@ -239,10 +245,9 @@ footer b{color:var(--fg);font-weight:600}
     <span class="stats" id="usage-hdr" hidden>
       <svg class="i" viewBox="0 0 24 24" aria-label="power-ons"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg><b id="stat-power">—</b>
       <svg class="i" viewBox="0 0 24 24" aria-label="motor starts"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg><b id="stat-motor">—</b>
-      <button class="icon" id="btn-usage" type="button" aria-label="refresh counters" disabled><svg class="i" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 4v7h-7"/></svg></button>
     </span>
     <span class="count" id="rooted" hidden></span>
-    <span class="status" id="status" data-state="idle">not connected</span>
+    <span class="status" id="status" data-state="idle" role="status" aria-live="polite">not connected</span>
   </header>
 
   <main>
@@ -262,11 +267,19 @@ footer b{color:var(--fg);font-weight:600}
       </div>
       <div class="log">
         <div class="log-head"><span>Log</span><button class="text" id="btn-copy" type="button">copy</button></div>
-        <pre id="log"></pre>
+        <pre id="log" role="log" aria-live="polite" aria-label="Activity log" tabindex="0"></pre>
       </div>
     </section>
 
-    <div id="success" class="banner" hidden></div>
+    <div id="success" class="banner" role="status" aria-live="polite" hidden></div>
+
+    <div id="untested" class="notice" hidden style="display:flex;align-items:flex-start;gap:12px;border-color:var(--warn)">
+      <div style="flex:1;min-width:0">
+        <b>Untested device: <span id="untested-name"></span></b>
+        <p style="margin:4px 0 0;color:var(--muted)">This USB product ID hasn't been tested with toolya. It may still work — but proceed with caution.</p>
+      </div>
+      <button class="btn sm" id="untested-send" type="button" style="flex:none">Send anonymous report</button>
+    </div>
 
     <div id="view-root">
       <div class="head"><h2>Advanced</h2><span class="muted">session tweaks · reset on reboot</span></div>
@@ -319,35 +332,53 @@ footer b{color:var(--fg);font-weight:600}
               <button class="btn tonal" id="nat-install" type="button" disabled>Install</button>
             </div>
           </div>
+          <div id="mod-picker" class="modpick" hidden>
+            <div class="sect-label">Mods to install</div>
+            <div id="mod-list"></div>
+            <div class="row" style="gap:8px">
+              <label class="btn sm file"><input class="sr" type="file" id="mod-custom" accept=".so" multiple> + custom .so</label>
+              <span class="hint" id="mod-custom-list" style="margin:0;padding:0;border:0"></span>
+            </div>
+          </div>
           <p class="hint"><b>Safe mode</b> boots with all mods <b>off</b> (a kill-switch — it doesn't uninstall). Turn it off to re-enable mods and reset the boot counter. Use it if a mod misbehaves.</p>
           <p class="muted" style="margin:8px 0 0;font-size:13px">Install writes to <code>/vendor</code> and survives reboot — a boot-loop auto-disables mods (brick-prevention first).
             The button activates once natartos ships a release. CLI alternative: <code>toolya natartos install</code>.
             See <a href="https://github.com/grom-labs/natartos" target="_blank" rel="noopener">grom-labs/natartos</a>.</p>
         </section>
-        <div class="grid">
-          <section class="card">
-            <h3>Screen · mirror</h3>
-            <div class="row">
-              <input class="field" id="scr-path" value="/data/local/tmp/screencap.bin" aria-label="frame path" autocomplete="off" spellcheck="false">
-              <button class="btn" id="scr-grab" type="button" disabled>Grab frame</button>
-              <label class="switch"><input type="checkbox" id="scr-auto" role="switch"> auto</label>
+        <div class="stack">
+          <details class="card">
+            <summary>Screen · live monitor <span class="state" id="scr-fps"></span></summary>
+            <div class="details-body">
+              <div class="row">
+                <input class="field" id="scr-path" value="/data/local/tmp/screencap.bin" aria-label="frame path" autocomplete="off" spellcheck="false">
+                <button class="btn" id="scr-grab" type="button" disabled>Grab frame</button>
+                <label class="switch"><input type="checkbox" id="scr-auto" role="switch"> stream</label>
+              </div>
+              <canvas class="wide" id="scr-canvas" width="640" height="360" role="img" aria-label="Goggles screen mirror"></canvas>
+              <p class="hint">Live BGRA 1920×1080 over adb. With natartos <b>display hook</b> installed → fb_shared mode (faster, no trigger). Without → screencap trigger mode (~2-3 fps).</p>
             </div>
-            <canvas class="wide" id="scr-canvas" width="640" height="360"></canvas>
-            <p class="hint">Raw BGRA 1920×1080 frame over adb — needs the natartos LiveView hook on the device.</p>
-          </section>
-          <section class="card">
-            <h3>Background · wallpaper</h3>
-            <div class="row">
-              <input class="field" type="file" id="bg-file" accept="image/*" aria-label="image">
-              <select class="field" id="bg-fit" aria-label="fit"><option value="cover">cover</option><option value="contain">contain</option></select>
+          </details>
+          <details class="card">
+            <summary>Background · wallpaper <span class="state">needs the display mod</span></summary>
+            <div class="details-body">
+              <div class="row">
+                <label class="btn file"><input class="sr" type="file" id="bg-file" accept="image/*" aria-label="image">Choose image <span id="bg-fname" class="muted" style="font-weight:400"></span></label>
+                <select class="field" id="bg-fit" aria-label="fit"><option value="cover">cover</option><option value="contain">contain</option></select>
+              </div>
+              <canvas class="wide" id="bg-preview" width="320" height="180" role="img" aria-label="Wallpaper preview"></canvas>
+              <div class="row" style="justify-content:flex-end;margin-top:4px">
+                <button class="btn" id="bg-download" type="button" disabled>Download .bmp</button>
+                <button class="btn tonal" id="bg-apply" type="button" disabled>Apply</button>
+              </div>
+              <p class="hint">Writes <code>/data/screendesk_1920.bmp</code>, shown via the natartos <b>display mod</b>.</p>
             </div>
-            <canvas id="bg-preview" width="320" height="180"></canvas>
-            <div class="row" style="justify-content:flex-end;margin-top:4px">
-              <button class="btn" id="bg-download" type="button" disabled>Download .bmp</button>
-              <button class="btn tonal" id="bg-apply" type="button" disabled>Apply</button>
+          </details>
+          <details class="card">
+            <summary>Boot splash <span class="state">needs the splash mod</span></summary>
+            <div class="details-body">
+              <p class="muted" style="margin:0;font-size:13px">Replace the boot splash with your own image — provided by a natartos <b>splash mod</b> (not available yet). The stock splash lives in a partition, not a <code>/data</code> file, so it needs its own mod to hook.</p>
             </div>
-            <p class="hint">Writes <code>/data/screendesk_1920.bmp</code>, shown via the natartos display path.</p>
-          </section>
+          </details>
         </div>
       </div>
     </div>

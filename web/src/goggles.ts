@@ -8,6 +8,21 @@
 
 export const DUML_VID = 0x2ca3;
 
+export interface DeviceInfo {
+  vendorId: number;
+  productId: number;
+  productName: string;
+}
+
+// Known DJI Goggles 3 (E3T zv902) USB product IDs in DUML mode.
+// If the device's PID isn't in this set, it's untested.
+const KNOWN_G3_PIDS = new Set([0x001e]);
+const G3_NAME_PATTERN = /goggles\s*3|zv902|e3t/i;
+
+export function isKnownDevice(d: DeviceInfo): boolean {
+  return KNOWN_G3_PIDS.has(d.productId) || G3_NAME_PATTERN.test(d.productName);
+}
+
 interface EnablePlan {
   handshake: Uint8Array<ArrayBuffer>[];
   init_count: number;
@@ -53,11 +68,17 @@ async function getEnablePlan(): Promise<EnablePlan> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Prompt for the goggles (DUML mode) and run the full enable sequence.
-export async function enableAdb(log: (s: string) => void): Promise<void> {
+// Returns info about the USB device so the caller can check if it's a known model.
+export async function enableAdb(log: (s: string) => void): Promise<DeviceInfo> {
   if (!navigator.usb) throw new Error("WebUSB not available in this browser");
   const plan = await getEnablePlan();
 
   const device = await navigator.usb.requestDevice({ filters: [{ vendorId: DUML_VID }] });
+  const info: DeviceInfo = {
+    vendorId: device.vendorId,
+    productId: device.productId,
+    productName: device.productName ?? "",
+  };
   log(`opening ${device.productName ?? "goggles"}…`);
   await device.open();
   if (device.configuration === null) await device.selectConfiguration(1);
@@ -138,4 +159,5 @@ export async function enableAdb(log: (s: string) => void): Promise<void> {
   } else {
     throw new Error("no cmd_id triggered a re-enumerate — keep the goggles awake and try again.");
   }
+  return info;
 }

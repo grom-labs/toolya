@@ -7,6 +7,8 @@ import {
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import { ReadableStream } from "@yume-chan/stream-extra";
 
+import { getContract } from "./wasm";
+
 // Stock desk background on the goggles.
 export const BG_PATH = "/data/screendesk_1920.bmp";
 
@@ -95,19 +97,16 @@ export async function run(adb: Adb, command: string): Promise<string> {
   return out;
 }
 
-// USB mode switch. rndis keeps acm,adb so access isn't lost. Switching
-// re-enumerates USB → the adb connection drops; we fire and don't await a reply.
-export const USB_CFG = {
-  adb: "acm,adb",
-  rndis: "rndis,mass_storage,bulk,acm,adb",
-} as const; // uvc dropped: ZV902 doesn't support UVC (#128)
+// USB mode configs from core contract (single source of truth).
+export type UsbMode = "adb" | "rndis";
+export async function usbCfgString(mode: UsbMode): Promise<string> {
+  const c = await getContract();
+  return c.usb[mode];
+}
 
 // SELinux session toggle (devmem). `setenforce 0` is neverallow-blocked on the G3,
 // so we poke the selinux_state enforce byte. Session-only (resets on reboot).
-// Addresses mirror g2-bridge-g3/research/toolya-contract.toml [selinux].state_addrs —
-// keep in sync with the contract (the CLI reads them from toolya_core::contract::selinux).
-const SELINUX_ADDRS = ["0x17b6648", "0x17e6888"];
-const SELINUX_ENFORCE_OFFSET = 1;
+// Addresses and offset from core contract (single source of truth).
 
 export async function getSelinux(adb: Adb): Promise<string> {
   return (await run(adb, "getenforce")).trim();
@@ -115,11 +114,13 @@ export async function getSelinux(adb: Adb): Promise<string> {
 
 /** mode: "permissive" → 0x00, "enforcing" → 0x01. Returns the resulting state. */
 export async function setSelinux(adb: Adb, mode: "permissive" | "enforcing"): Promise<string> {
+  const c = await getContract();
   const byte = mode === "permissive" ? "0x00" : "0x01";
-  const addrs = SELINUX_ADDRS.join(" ");
+  const addrs = c.selinux.addrs.join(" ");
+  const offset = c.selinux.enforce_offset;
   const sh =
     `for A in ${addrs}; do V=$(busybox devmem $A 32 2>/dev/null) || continue; ` +
-    `case "$V" in 0x01000100|0x01000000) busybox devmem $(printf 0x%X $((A+${SELINUX_ENFORCE_OFFSET}))) 8 ${byte}; break;; esac; done; getenforce`;
+    `case "$V" in 0x01000100|0x01000000) busybox devmem $(printf 0x%X $((A+${offset}))) 8 ${byte}; break;; esac; done; getenforce`;
   return (await run(adb, sh)).trim();
 }
 
@@ -132,29 +133,31 @@ export interface NatartosStatus {
   disabled: boolean;
 }
 export async function natartosStatus(adb: Adb): Promise<NatartosStatus> {
+  const n = (await getContract()).natartos;
   const version = (
     await run(
       adb,
-      "grep -o '\"natartos_version\"[^,]*' /vendor/natartos/manifest.json 2>/dev/null | cut -d'\"' -f4",
+      `grep -o '"natartos_version"[^,]*' ${n.manifest_device} 2>/dev/null | cut -d'"' -f4`,
     )
   ).trim();
   const bootcount = (
     await run(
       adb,
-      "if [ -f /data/.natartos_bootcount ]; then od -A n -t u4 -N 4 /data/.natartos_bootcount | tr -d ' '; else echo 0; fi",
+      `if [ -f ${n.bootcount} ]; then od -A n -t u4 -N 4 ${n.bootcount} | tr -d ' '; else echo 0; fi`,
     )
   ).trim();
-  const disabled = (await run(adb, "[ -f /data/.natartos_disabled ] && echo 1 || echo 0")).trim() === "1";
+  const disabled = (await run(adb, `[ -f ${n.disabled} ] && echo 1 || echo 0`)).trim() === "1";
   return { installed: version !== "", version, bootcount, disabled };
 }
 /** Kill-switch: on = disable mods next boot; off = re-enable + reset bootcount. */
 export async function natartosSafe(adb: Adb, on: boolean): Promise<void> {
-  if (on) await run(adb, "touch /data/.natartos_disabled");
-  else await run(adb, "rm -f /data/.natartos_disabled; printf '\\x00\\x00\\x00\\x00' > /data/.natartos_bootcount");
+  const n = (await getContract()).natartos;
+  if (on) await run(adb, `touch ${n.disabled}`);
+  else await run(adb, `rm -f ${n.disabled}; printf '\\x00\\x00\\x00\\x00' > ${n.bootcount}`);
 }
 
-export async function setUsbMode(adb: Adb, mode: keyof typeof USB_CFG): Promise<void> {
-  const cfg = USB_CFG[mode];
+export async function setUsbMode(adb: Adb, mode: UsbMode): Promise<void> {
+  const cfg = await usbCfgString(mode);
   await run(adb, `setprop sys.usb.config none; sleep 2; setprop sys.usb.config ${cfg}`).catch(() => {
     /* USB re-enumerates mid-command; a dropped reply is expected */
   });
