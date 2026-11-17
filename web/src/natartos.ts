@@ -435,7 +435,7 @@ async function extractFromZip(data: Uint8Array, nameRe: RegExp): Promise<Uint8Ar
       if (method === 8) {
         const ds = new DecompressionStream("deflate-raw");
         const w = ds.writable.getWriter();
-        void w.write(raw).then(() => w.close());
+        void w.write(new Uint8Array(raw)).then(() => w.close());
         const r = ds.readable.getReader();
         const chunks: Uint8Array[] = [];
         for (;;) { const { done, value } = await r.read(); if (done) break; chunks.push(value); }

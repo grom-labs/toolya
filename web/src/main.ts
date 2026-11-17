@@ -7,6 +7,7 @@ import { fetchLatestRelease, loadManifest, installFromRelease, startMods, uninst
 import { connectAdb, readUsage, run, runInDir, setUsbMode, usbCfgString, setSelinux, getSelinux, natartosStatus, natartosSafe, natartosDump, pushFile, pullFile } from "./adb";
 import { toScreenJpeg, previewInto, bgraToCanvas } from "./image";
 import { startStream, type StreamHandle } from "./stream";
+import { collectAdbDiagnostics } from "./diagnostics";
 import { startPcStream, type PcStreamHandle } from "./pc-stream";
 import { sendKey, holdKey } from "./input";
 import type { Adb } from "@yume-chan/adb";
@@ -19,6 +20,7 @@ function log(s: string) {
 }
 
 let adb: Adb | null = null;
+let diagnosticCollection: AbortController | null = null;
 let term: Terminal | null = null;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 
@@ -554,6 +556,7 @@ function updateNatInstall() {
   btn("nat-noverity", !(DRY || adb));
   btn("doom-dl", !(DRY || adb));
   btn("nat-dump", !(DRY || adb));
+  btn("nat-report", !adb || diagnosticCollection !== null);
 }
 function renderMods(m: Manifest) {
   const list = $("mod-list");
@@ -751,6 +754,29 @@ $("doom-file").addEventListener("change", async (e) => {
 });
 
 // --- dump (diagnostics for bug reports) ---
+$("nat-report").addEventListener("click", async () => {
+  if (!adb || diagnosticCollection) return;
+  const connection = adb;
+  const controller = new AbortController();
+  diagnosticCollection = controller;
+  btn("nat-report", true);
+  try {
+    const report = await collectAdbDiagnostics(connection, { signal: controller.signal });
+    if (controller.signal.aborted || adb !== connection) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2) + "\n"], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "toolya-diagnostics.json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    log("diagnostic report exported (identifiers and raw logs excluded)");
+  } catch {
+    if (!controller.signal.aborted) log("diagnostic export failed");
+  } finally {
+    if (diagnosticCollection === controller) diagnosticCollection = null;
+    updateNatInstall();
+  }
+});
 $("nat-dump").addEventListener("click", async () => {
   if (!adb) return;
   btn("nat-dump", true);
@@ -945,6 +971,7 @@ function stopHeartbeat() {
 }
 
 async function disconnect() {
+  diagnosticCollection?.abort();
   stopHeartbeat();
   // Stop PC Stream before closing adb — it must touch fb_stop over the live link.
   if (pcStream?.active) { try { await pcStream.stop(); } catch { /* ignore */ } }
