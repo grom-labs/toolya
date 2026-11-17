@@ -5,6 +5,7 @@
   "type": "module",
   "description": "toolya web: enable adb + root terminal over WebUSB (DJI Goggles 3)",
   "scripts": {
+    "test": "node --experimental-vm-modules --test tests/stream-lifecycle.test.mjs",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",

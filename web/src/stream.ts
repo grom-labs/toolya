@@ -74,9 +74,33 @@ export async function startStream(
   let fps = 0;
   let frames = 0;
   let fpsT0 = performance.now();
-  let proc: { kill(): void } | null = null;
+  let proc: { kill(): void | PromiseLike<void> } | null = null;
+  let reader: { cancel(): Promise<void>; releaseLock(): void } | null = null;
+
+  // Cleanup is best-effort after a disconnect, but its async failures still
+  // need a rejection handler because stop() is intentionally synchronous.
+  function cleanup(action: () => void | PromiseLike<void>) {
+    void (async () => {
+      try { await action(); } catch { /* already closing */ }
+    })();
+  }
+
+  function close() {
+    running = false;
+    const r = reader;
+    reader = null;
+    if (r) {
+      cleanup(async () => {
+        try { await r.cancel(); } finally { r.releaseLock(); }
+      });
+    }
+    const p = proc;
+    proc = null;
+    if (p) cleanup(() => p.kill());
+  }
 
   function tickFps() {
+    if (!running) return;
     frames++;
     const now = performance.now();
     const dt = now - fpsT0;
@@ -94,13 +118,17 @@ export async function startStream(
       try {
         const p = await adb.subprocess.noneProtocol.spawn(`${FB_STREAM_PATH} 75 60`);
         proc = p;
+        // Stop may have run while spawn was pending. The finally block also
+        // closes this late process without starting a reader.
+        if (!running) return;
 
-        const reader = p.output.getReader();
+        const outputReader = p.output.getReader();
+        reader = outputReader;
         let buf = new Uint8Array(0);
 
         while (running) {
-          const { done, value } = await reader.read();
-          if (done) break;
+          const { done, value } = await outputReader.read();
+          if (!running || done) break;
 
           // Append chunk to buffer
           const next = new Uint8Array(buf.length + value.length);
@@ -109,7 +137,7 @@ export async function startStream(
           buf = next;
 
           // Parse frames: [uint32_le size][jpeg_bytes]
-          while (buf.length >= 4) {
+          while (running && buf.length >= 4) {
             const sz = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
             if (sz === 0 || sz > 10_000_000) { running = false; break; }
             if (buf.length < 4 + sz) break; // need more data
@@ -120,13 +148,21 @@ export async function startStream(
             // Decode JPEG using browser native decoder
             const blob = new Blob([jpeg], { type: "image/jpeg" });
             const bmp = await createImageBitmap(blob);
-            ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-            bmp.close();
+            try {
+              if (!running) return;
+              ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+            } finally {
+              bmp.close();
+            }
             tickFps();
           }
         }
       } catch (e) {
-        if (running) { running = false; onError?.(e); }
+        const report = running;
+        close();
+        if (report) onError?.(e);
+      } finally {
+        close();
       }
     })();
   } else {
@@ -139,6 +175,7 @@ export async function startStream(
     const dst32 = new Uint32Array(imgData.data.buffer);
 
     function renderRaw(bgra: Uint8Array, offset: number) {
+      if (!running) return;
       const src = new Uint32Array(bgra.buffer, bgra.byteOffset + offset, PIXEL_COUNT);
       for (let i = 0; i < PIXEL_COUNT; i++) {
         const px = src[i];
@@ -150,27 +187,29 @@ export async function startStream(
     }
 
     (async () => {
-      while (running) {
-        try {
+      try {
+        while (running) {
           await run(adb, c.screen.grab_trigger);
+          if (!running) break;
           await sleep(80);
+          if (!running) break;
           const raw = await pullFile(adb, c.files.screencap);
+          if (!running) break;
           if (raw.length !== FRAME_BYTES) { await sleep(200); continue; }
           renderRaw(raw, 0);
-        } catch (e) {
-          if (!running) break;
-          running = false;
-          onError?.(e);
         }
+      } catch (e) {
+        const report = running;
+        close();
+        if (report) onError?.(e);
+      } finally {
+        close();
       }
     })();
   }
 
   return {
-    stop() {
-      running = false;
-      if (proc) { try { proc.kill(); } catch { /* ignore */ } proc = null; }
-    },
+    stop: close,
     get fps() { return fps; },
     get mode() { return mode; },
     get active() { return running; },
