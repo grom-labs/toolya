@@ -483,6 +483,46 @@ footer b{color:var(--fg);font-weight:600}
               <p class="hint">Stream your PC screen to the goggles over USB. <code>fb_receiver</code> is pushed automatically; JPEG frames go through the ADB connection. Needs the natartos <b>display hook</b> for fb_shared inject.</p>
             </div>
           </details>
+          <details class="card" id="eyepiece-card">
+            <summary>Eyepiece stream <span class="state" id="ep-status">connect ADB first</span></summary>
+            <div class="details-body">
+              <div class="row" style="flex-wrap:wrap;gap:8px">
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+                  FPS <select class="field" id="ep-fps" style="width:auto">
+                    <option value="60">60</option>
+                    <option value="100" selected>100 (panel rate)</option>
+                  </select>
+                </label>
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+                  Bitrate <select class="field" id="ep-br" style="width:auto">
+                    <option value="10000000">10 Mbit/s</option>
+                    <option value="20000000" selected>20 Mbit/s</option>
+                    <option value="30000000">30 Mbit/s</option>
+                  </select>
+                </label>
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px" title="Diagnostics: the goggles measure when each decoded frame actually reaches the panel and report it every 3 s; the numbers appear on this page under the Start button, nothing is shown in the goggles (eyepiece_bridge -M). Applies when the stream starts.">
+                  <input type="checkbox" id="ep-metrics"> Measure display timing (shown here)
+                </label>
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px" title="Turns on the goggles' head-orientation stream (MCU, 100 Hz, no drone needed) and shows yaw/pitch/roll here. Off by default: the IMU stream only runs while this is ticked. Can be switched while streaming.">
+                  <input type="checkbox" id="ep-headtrack"> Head tracking (show pose)
+                </label>
+              </div>
+              <div class="row" style="justify-content:space-between;font-size:12px;color:var(--fg-dim)">
+                <span id="ep-stats"></span>
+                <button class="btn tonal" id="ep-stream" type="button" disabled>Start Eyepiece</button>
+              </div>
+              <div id="ep-pose" class="row" style="font-size:12px;color:var(--fg-dim);justify-content:space-between;align-items:center" hidden>
+                <canvas id="ep-pose-gfx" style="width:160px;height:110px" title="Head pose, seen from behind: the arrow is where you look"></canvas>
+                <span id="ep-pose-val">waiting for the first sample…</span>
+                <button class="btn tonal" id="ep-recenter" type="button" title="Make the current head direction yaw 0">Recenter</button>
+              </div>
+              <div id="ep-disp" style="font-size:12px;color:var(--fg-dim)" hidden>
+                <span id="ep-disp-val"></span>
+                <div style="color:var(--muted)"><b>push→latch</b>: decoded frame handed to the display until the panel refresh that starts showing it (waiting for scan-out; 0–10 ms at 100 Hz). <b>refresh interval</b>: time between two new frames on the panel (10 ms = a new frame on every refresh; 20 ms steps = repeated frames).</div>
+              </div>
+              <p class="hint">Low-latency H.264: browser screen capture → WebCodecs hardware encoder → <code>eyepiece_bridge</code> on the goggles (hardware decode, direct scan-out). Needs the natartos <b>zuim_eyepiece</b> and <b>overlay</b> mods. Chromium only.</p>
+            </div>
+          </details>
           <details class="card" hidden>
             <summary>Boot splash <span class="state">needs the splash mod</span></summary>
             <div class="details-body">
