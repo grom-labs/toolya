@@ -559,7 +559,7 @@ fn cmd_push(dir: &Path, files: &[&str], no_restart: bool) {
         .and_then(|m| m.files.iter().find(|a| a.file == "inject.sh"))
         .map(|a| a.device_path.as_str())
         .unwrap_or("/vendor/natartos/inject.sh");
-    let _ = shell(&mut dev, &format!("nohup sh {inject} > /data/local/tmp/natartos_inject.log 2>&1 &"));
+    let _ = shell(&mut dev, &format!("setsid sh {inject} </dev/null >/dev/null 2>&1 & sleep 2"));
 
     println!("Waiting 8s for startup...");
     std::thread::sleep(std::time::Duration::from_secs(8));
@@ -1156,6 +1156,9 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>,
     // clear stale anti-brick state
     let _ = shell(&mut dev, &format!("rm -f {BOOTCOUNT_PATH} {STATUS_PATH} {DISABLED_PATH}"));
     let _ = shell(&mut dev, "sync");
+    // /vendor back to read-only right away: a kernel crash or power loss while
+    // it is rw (e.g. during mod activation below) is the one way to damage it.
+    let _ = shell(&mut dev, "sync; mount -o remount,ro /vendor");
 
     // Activate immediately: init won't see the new .rc until reboot,
     // so stop stock dji_glasses and run inject.sh now.
@@ -1167,7 +1170,7 @@ fn cmd_install(confirmed: bool, local_dir: Option<&Path>, version: Option<&str>,
         .find(|a| a.file == "inject.sh")
         .map(|a| a.device_path.as_str())
         .unwrap_or("/vendor/natartos/inject.sh");
-    let _ = shell(&mut dev, &format!("setsid sh {inject_path} </dev/null >/dev/null 2>&1 &"));
+    let _ = shell(&mut dev, &format!("setsid sh {inject_path} </dev/null >/dev/null 2>&1 & sleep 2"));
 
     println!("\n=== natartos {} installed and activated ===", m.natartos_version);
     println!("Mods are running. After a reboot: toolya adb --yes && toolya natartos start");
@@ -1257,7 +1260,7 @@ fn cmd_uninstall(confirmed: bool) {
     let _ = shell(&mut dev, "rm -f /vendor/etc/init/persist_adb.rc");
     let _ = shell(&mut dev, &format!("rm -f {BOOTCOUNT_PATH} {STATUS_PATH} {DISABLED_PATH}"));
     let _ = shell(&mut dev, &format!("rm -f {LOG_PATH}"));
-    let _ = shell(&mut dev, "sync");
+    let _ = shell(&mut dev, "sync; mount -o remount,ro /vendor");
 
     println!("\n=== natartos removed, stock restored ===");
     println!("Reboot to return to fully stock goggles.");
@@ -1335,6 +1338,11 @@ fn cmd_start() {
 
     println!("Starting mods...");
     let _ = shell(&mut dev, "mkdir -p /data/local/tmp");
+    // Stop a still-running inject loop before dropping its pid file: older
+    // inject.sh versions only find their predecessor through that file, so a
+    // second start would run a second loop (two dji_glasses fighting over the
+    // display). Exact argv match only.
+    let _ = shell(&mut dev, &stop_inject_cmd(inject_path));
     let _ = shell(&mut dev, "rm -f /data/local/tmp/natartos_inject.log /data/local/tmp/natartos_inject.pid /data/local/tmp/natartos_menu.log /data/local/tmp/natartos.log");
     let _ = shell(&mut dev, "sync && echo 3 > /proc/sys/vm/drop_caches");
 
@@ -1355,7 +1363,8 @@ fn cmd_start() {
 
     println!("Launching inject.sh...");
     let _ = shell(&mut dev, &format!(
-        "nohup sh {inject_path} > /data/local/tmp/natartos_inject.log 2>&1 &"
+        // setsid, not nohup: on zv902 fw 01.00.1600 a nohup'ed child dies with the adb shell
+        "setsid sh {inject_path} </dev/null >/dev/null 2>&1 & sleep 2"
     ));
 
     println!("Waiting 12s for dji_glasses startup...");
@@ -1592,4 +1601,13 @@ fn cmd_dump() {
     }
     println!("```");
     eprintln!("\nPaste this into a GitHub issue or Discord for support.");
+}
+
+/// Shell command that kills every running `sh <inject_path>` loop (exact argv).
+fn stop_inject_cmd(inject_path: &str) -> String {
+    format!(
+        "for d in /proc/[0-9]*; do case \"$(tr '\\0' ' ' < $d/cmdline 2>/dev/null)\" in \
+         \"sh {p} \"|\"/system/bin/sh {p} \") kill -9 ${{d#/proc/}};; esac; done; true",
+        p = inject_path
+    )
 }
